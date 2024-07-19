@@ -2,6 +2,8 @@ from fastapi import APIRouter, FastAPI, Form, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from typing import Optional, List
 from enum import Enum
 from jose import JWTError, jwt
@@ -9,17 +11,18 @@ from datetime import datetime, timedelta
 from services.mailersend import send_email
 import random
 import string
-from services.db import users_collection  # Import the users collection from the database module
+from services.db import users_collection
 
 # Constants for JWT
 SECRET_KEY = "your_secret_key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+OTP_EXPIRE_MINUTES = 10
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-router = APIRouter(prefix="/users", tags=["user, users"])
+router = APIRouter(prefix="/users", tags=["users"])
 
 def generate_otp(length=6):
     characters = string.ascii_letters + string.digits
@@ -89,64 +92,98 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class OTPVerification(BaseModel):
+    otp: str
+
+@router.post("/register", response_model=User, tags=["register"])
+async def register_user(user: User):
+    if get_user(user.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    user_dict = user.dict()
+    user_dict['password'] = get_password_hash(user.password)
+    user_dict['reset_password_otp'] = generate_otp()
+    
+    users_collection.insert_one(user_dict)
+    send_email(user.email, "Account Verification", f"Your verification OTP is: {user_dict['reset_password_otp']}")
+    
+    return {"message": "Registration successful. Please check your email for the OTP verification code."}
+
+@router.post("/verify-otp", response_model=User, tags=["verify"])
+async def verify_otp(email: str, otp: str):
+    user = get_user(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user['reset_password_otp'] != otp:
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    # OTP verified successfully
+    user['reset_password_otp'] = None  # Clear OTP after successful verification
+    users_collection.update_one({"email": email}, {"$set": {"reset_password_otp": None}})
+    
+    return {"message": "OTP verified successfully. You can now log in."}
+
 @router.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(form_data.username, form_data.password)
+    
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Admin or user specific OTP check
+    if user['role'] == UserRole.admin:
+        if user.get('last_login') and (datetime.utcnow() - user['last_login']).total_seconds() > 43200:  # 12 hours
+            otp = generate_otp(8)
+            send_email(user["email"], "Admin Login", f"Your OTP is: {otp}")
+            return {"message": "OTP sent to email", 'otp': otp}
+    elif user['role'] in [UserRole.customer, UserRole.worker]:
+        otp = generate_otp(6)
+        send_email(user["email"], "User Login", f"Your OTP is: {otp}")
+        return {"message": "OTP sent to email", 'otp': otp}
+    
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["email"]}, expires_delta=access_token_expires
     )
+
+    # Update last login time
+    users_collection.update_one({"email": form_data.username}, {"$set": {"last_login": datetime.utcnow()}})
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.post("/login/verify-otp", response_model=Token, tags=["login"])
+async def login_verify_otp(email: str, otp: OTPVerification):
+    user = get_user(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user['role'] == UserRole.admin and user.get('last_login') and (datetime.utcnow() - user['last_login']).total_seconds() > 43200:
+        # Admin requires OTP verification
+        if user['reset_password_otp'] != otp.otp:
+            raise HTTPException(status_code=401, detail="Invalid OTP")
+
+        # Clear OTP and update last login time
+        users_collection.update_one({"email": email}, {"$set": {"reset_password_otp": None, "last_login": datetime.utcnow()}})
+    elif user['reset_password_otp'] != otp.otp:
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": email}, expires_delta=access_token_expires
+    )
+    
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/users/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-@router.post("/register", response_model=User)
-async def register_user(user: User):
-    user_dict = user.dict()
-    user_dict['password'] = get_password_hash(user.password)
-    users_collection.insert_one(user_dict)
-    return user_dict
-
 @router.get("/users", response_model=List[User])
 async def get_users():
-    users = list(users_collection.find({}, {"_id": 0, "password": 0}))
+    users = list(users_collection.find({}, {"_id": 0, "password": 0, "reset_password_otp": 0}))
     return users
-
-@router.post("/login", tags=["login"])
-async def login(email: str = Form(...), password: str = Form(...)):
-    # Check if user exists
-    user = get_user(email)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Verify password
-    if not verify_password(password, user['password']):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Check user role
-    if user['role'] == UserRole.admin:
-        # Generate and send OTP
-        otp = generate_otp(8)
-        # Implement OTP generation and sending logic here
-        send_email(user["email"], "User Login", f"User login successfully. Check your email for OTP: {otp}")
-        return {"message": "OTP sent to email/phone", 'otp': otp}
-    elif user['role'] == UserRole.customer:
-        # Give options to log in with password or OTP
-        otp = generate_otp(6)
-        # Implement OTP generation and sending logic here
-        send_email(user["email"], "User Login", f"User login successfully. Check your email for OTP: {otp}")
-        return {"message": "Choose login method: Password or OTP", 'otp': otp}
-    elif user['role'] == UserRole.worker:
-        # Login with phone number and OTP
-        otp = generate_otp(7)
-        # Implement OTP generation and sending logic here
-        send_email(user["email"], "User Login", f"User login successfully. Check your email for OTP: {otp}")
-        return {"message": "OTP sent to phone", 'otp': otp}
-
-

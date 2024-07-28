@@ -9,20 +9,19 @@ def send_email(recipient_email, subject, body):
     sender_email = os.environ.get("sender")
     smtp_email = os.environ.get("SMTP_USERNAME")
     password = os.environ.get("SMTP_PASSWORD")
-    
-    print(password)
-
+    HOST = os.environ.get("SMTP_SERVER")
+    PORT = int(os.environ.get("Port"))
 
     message = f"""\
-    Subject: {subject}
-   
-    From: {sender_email}
+Subject: {subject}
 
-    {body}"""
+From: {sender_email}
+
+{body}"""
 
     try:
-        with smtplib.SMTP("smtp.mailgun.org", 587) as server:
-            server.login(smtp_email,password)
+        with smtplib.SMTP(HOST, PORT) as server:
+            server.login(smtp_email, password)
             server.sendmail(sender_email, recipient_email, message)
         print("Email sent successfully.")
     except Exception as e:

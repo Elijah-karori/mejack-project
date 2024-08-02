@@ -14,7 +14,7 @@ EMAIL_PORT = os.getenv("EMAIL_PORT")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 
-def send_email(to_email: str, subject: str, body: str):
+def sendmail(to_email: str, subject: str, body: str):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_USER
     msg['To'] = to_email
@@ -41,9 +41,9 @@ class EmailSchema(BaseModel):
     body: str
 
 @app.post("/send-email/")
-async def send_email_endpoint(email_data: EmailSchema):
+async def sendmail_endpoint(email_data: EmailSchema):
     try:
-        send_email(email_data.email, email_data.subject, email_data.body)
+        sendmail(email_data.email, email_data.subject, email_data.body)
         return {"message": "Email sent successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send email: {e}")

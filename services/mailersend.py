@@ -12,7 +12,7 @@ def generate_otp(length=6):
     return ''.join(random.choice(characters) for _ in range(length))
 
 def send_email(receiver_email, subject, body):
-    sender_email = "customercare@mejack.xyz"
+    sender_email = os.environ.get("sender")
     username = os.environ.get("SMTP_USERNAME")
     password = os.environ.get("SMTP_PASSWORD")
     stmp_server=os.environ.get("SMTP_SERVER")
@@ -34,3 +34,4 @@ def send_email(receiver_email, subject, body):
         print(f"Error: {e}")
 
 # Example usage
+

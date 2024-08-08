@@ -23,8 +23,21 @@ def send_email(receiver_email, subject, body):
     msg['Subject'] = subject
 
     msg.attach(MIMEText(body, 'plain'))
+    stmp_server=os.environ.get("SMTP_SERVER")
+
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, 'plain'))
 
     try:
+        with smtplib.SMTP(stmp_server, 587) as server:
+            server.starttls()
+            server.login(username, password)
+            server.send_message(msg)
+            print("Email sent successfully")
         with smtplib.SMTP(stmp_server, 587) as server:
             server.starttls()
             server.login(username, password)
